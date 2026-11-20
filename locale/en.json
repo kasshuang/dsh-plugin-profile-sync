@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Cloud sync",
+    "description": "Mirror the plugin roster and whitelisted plugin settings through a private GitHub repo or a synced folder.",
+    "detail": "## Cloud sync\n\nKeeps the profile plugin roster and whitelisted plugin settings in a private repository or a folder your cloud drive already syncs, then aligns another machine in one click.\n\n- Data only: plugin names, versions, enabled state, and explicitly whitelisted settings. Credentials, sign-in state, and session logs never leave the machine.\n- Two transports: a private GitHub repository (fine-grained token, Contents read/write) or a local/synced folder such as OneDrive.\n- Every pull renders a diff first; installing or overwriting always needs your explicit selection, and auto sync is off by default.\n- Installs go through the DSH `pluginManager` service — the same path as the plugin manager UI.\n"
+  }
+}

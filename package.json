@@ -1,0 +1,66 @@
+{
+  "name": "dsh-plugin-profile-sync",
+  "version": "0.1.0",
+  "description": "Sync which DSH plugins are installed, plus whitelisted plugin settings, through a private GitHub repository or a synced folder.",
+  "type": "module",
+  "main": "./index.js",
+  "license": "MIT",
+  "author": "kasshuang",
+  "icon": "icon.svg",
+  "homepage": "https://github.com/kasshuang/dsh-plugin-profile-sync#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kasshuang/dsh-plugin-profile-sync.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kasshuang/dsh-plugin-profile-sync/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek-harness",
+    "sync",
+    "profile",
+    "settings"
+  ],
+  "engines": {
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0 || >=0.2.3-rc.1 <0.3.0-0 || >=0.2.4-rc.1 <0.3.0-0",
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    },
+    "compatibility": {
+      "dsh": ">=0.2.2-rc.1 <0.3.0-0 || >=0.2.3-rc.1 <0.3.0-0 || >=0.2.4-rc.1 <0.3.0-0"
+    }
+  }
+}

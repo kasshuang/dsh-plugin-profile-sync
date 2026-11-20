@@ -1,0 +1,3 @@
+- insert:
+    - id: profile-sync
+      name: dsh-plugin-profile-sync
