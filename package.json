@@ -1,9 +1,12 @@
 {
   "name": "dsh-plugin-profile-sync",
-  "version": "0.1.0",
+  "version": "0.2.2",
   "description": "Sync which DSH plugins are installed, plus whitelisted plugin settings, through a private GitHub repository or a synced folder.",
   "type": "module",
   "main": "./index.js",
+  "scripts": {
+    "test": "node test/device-flow.test.mjs"
+  },
   "license": "MIT",
   "author": "kasshuang",
   "icon": "icon.svg",

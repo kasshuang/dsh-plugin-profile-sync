@@ -1,88 +1,83 @@
 # dsh-plugin-profile-sync
 
-同步「这台电脑装了哪些 DSH 插件」和登记过的插件设置——通过**私有 GitHub 仓库**或**本地/云盘文件夹**，换台电脑对齐后立刻能用同款环境。
+把「装了哪些 DSH 插件」和白名单插件的设置同步到私有 GitHub 仓库或云盘目录，新机器对齐一次就能接着用。
 
-它不是账号系统，也不碰会话数据：只搬运插件名称、版本、启用状态和你在白名单里登记过的设置项。
-
-## 为什么需要它
-
-DSH 的插件装在**每台电脑各自**的 profile 里（`~/.dsh/profiles/<name>`），没有账号级同步。于是：
-
-- 换电脑要一个个重装插件；
-- 插件设置（比如余额插件的主线模型、折叠的运营商）存在浏览器 `localStorage`，换机就回到默认值。
-
-这个插件把这两件事变成两条 JSON 记录，放进你自己的云盘目录或私有仓库，新机器上拉取、核对差异、点一下应用即可。
+- 同步内容：插件名、版本、启用状态；白名单设置命名空间的 JSON 值。
+- 不同步内容：凭据、聊天记录、任何插件私有数据。
+- 两种载体：私有 GitHub 仓库（推荐）、本地/云盘文件夹（OneDrive、iCloud 等）。
 
 ## 安装
 
-在 DSH 里：**插件 → 添加插件 → 安装 npm 包**，填：
+在 DSH 里「设置 → 插件 → 安装」，填入 `dsh-plugin-profile-sync`；或：
 
-```
-dsh-plugin-profile-sync
-```
-
-也可以添加索引源，之后在插件市场里点安装：
-
-```
-https://cdn.jsdelivr.net/gh/kasshuang/dsh-plugin-profile-sync@main/market/index.json
+```powershell
+dsh plugin add dsh-plugin-profile-sync
 ```
 
-装好后打开 **设置 → 云同步**。
+安装后到「设置 → 云同步」。
 
-## 用法
+## 连接 GitHub（推荐：一次授权，零配置）
 
-1. **选载体**：本地/云盘文件夹（OneDrive、坚果云、Syncthing 都行）或私有 GitHub 仓库。
-2. **填位置并保存**：
-   - 文件夹模式：填一个已同步目录，例如 `C:\Users\you\OneDrive\dsh`；插件会在里面写 `dsh-profile-sync.json`。
-   - 仓库模式：填 `owner/repo`、分支（默认 `main`）、文件路径（默认 `dsh-profile-sync.json`），再粘贴一个 **Fine-grained token**，权限只需要 *Contents: Read and write*。token 存在 DSH 凭据库，不写进配置文件、不同步。
-3. **推送到云端**：把这台机器的插件清单和白名单设置写上去。
-4. **从云端拉取**（新机器）：读取云端快照，跟本机比对，列出三类差异：
-   - 待安装（云端有、本机没有）
-   - 版本/启用状态不同
-   - 设置差异（本机没有、云端更新、本机更新）
-   - 另外会单列「仅本机有」——这些**永远不会被删除**。
-5. **应用所选**：只安装/覆盖你勾选的行。安装走 DSH 的 `pluginManager`，和界面里手动安装同一条路径（所以该要的重启、该失败的失败都如实反馈）。
+1. 打开「设置 → 云同步」，载体选 **私有 GitHub 仓库**，点 **连接 GitHub**。
+2. 弹窗给出一组 8 位码和一个链接：打开链接，输入码，点 Authorize。
+3. 授权完成后插件自动：创建私有仓库 `<你的账号>/dsh-profile-sync-data`（已存在就复用，空仓库会补上首个提交）、保存 token、填好仓库/分支/文件路径。
 
-默认**不自动同步**，每次都是「拉取 → 看差异 → 点应用」，避免某台机器把整个环境带偏。
+之后只剩两个按钮：**推送到云端**、**从云端拉取**。
 
-## 设置白名单
+> 需要插件自带 OAuth App 的 Client ID，见文末「给插件作者」。
 
-插件设置按 DSH 的约定存放在：
+## 用云盘文件夹
 
-```
-~/.dsh/plugin-settings/<namespace>.json
-```
+载体选 **本地/云盘文件夹**，填一个会被同步的目录（例如 `C:\Users\you\OneDrive\dsh`）。不需要任何账号；多台机器靠网盘同步同一个 `dsh-profile-sync.json`。冲突以文件更新时间较新的一方为准。
 
-结构是 `{ "updatedAt": <毫秒时间戳>, "values": { ... } }`。任何插件把自己的设置写到这里，就会被云同步带上（合并时按 `updatedAt` 取较新的一侧）。
+## 从云端恢复
 
-余额用量插件 `dsh-plugin-balance-usage` 从 1.0.1 起已经这么做了——它的「主线模型」「折叠的运营商」就是存在这个文件里的。
+1. **从云端拉取** → 列出云端有、本机没有的插件，以及设置差异。
+2. 勾选要恢复的条目 → **应用所选**。只会安装或覆盖勾选的内容，不会删除本机独有的插件。
 
-## 同步什么、不同步什么
+## 状态与配置
 
-| 会同步 | 不同步 |
+状态文件：`%DSH_HOME%\profile-sync\state.json`（默认 `C:\Users\<you>\.dsh\profile-sync\state.json`）
+
+| 字段 | 说明 |
 | --- | --- |
-| 插件包名、版本、启用状态 | 账号登录态、token、API key |
-| `~/.dsh/plugin-settings/*.json` 里的白名单设置 | 会话记录、聊天内容、附件 |
-| 快照时间戳 | 任何本机路径之外的文件 |
+| `adapter` | `repo` 或 `folder` |
+| `repo` | `owner/repo` |
+| `branch` / `docPath` | 默认 `main` / `dsh-profile-sync.json` |
+| `folder` | 云盘目录绝对路径 |
+| `autoSync` | 预留 |
+| `lastPushAt` / `lastPullAt` / `lastError` | 最近一次操作 |
 
-## 安全
+白名单设置目录：`%DSH_HOME%\plugin-settings\<namespace>.json`。
 
-- 所有请求必须同源（`sec-fetch-site` / `origin` 校验），跨站请求一律 403。
-- GitHub token 存在 DSH 凭据库（`credentials`），不落配置文件、不出现在同步文档里。
-- 私有仓库里只有插件清单和设置值——如果某个设置本身就是敏感值，请不要把它登记进白名单。
-- 应用阶段只做「安装/覆盖」，不做删除。
+## 隐私
 
-## 已知限制
+- token 走 DSH 的 credentials 服务，落在 `~/.dsh/.credentials.yaml`，**不会**写进同步文档。
+- 同步文档里只有插件清单和白名单命名空间的设置值。
+- 设备授权码只在内存里保存一次轮询周期，授权完成或取消即丢弃。
 
-- GitHub 仓库模式需要你自己建仓库并给 token；插件不会替你创建仓库。
-- 云端快照只有一份（无历史版本），冲突时按 `updatedAt` 取较新的一侧。
-- 应用插件安装时，某些插件可能提示需要重启 DSH 才完全生效（返回 `restart-required`）。
-- 不同机器的路径不同，插件只同步标识符与设置值，不同步绝对路径。
+## 给插件作者：注册 OAuth App（一次性，约一分钟）
 
-## 卸载
+1. GitHub → Settings → Developer settings → **OAuth Apps** → **New OAuth App**。
+2. 填：
+   - Application name：`DSH Profile Sync`
+   - Homepage URL：仓库地址即可
+   - Authorization callback URL：`http://127.0.0.1:1/callback`（Device Flow 不使用它，填个合法 URL 只为通过校验）
+3. 创建后进入应用设置，勾选 **Enable Device Flow**。
+4. 复制 **Client ID**，填到 `index.js` 顶部的 `DEFAULT_CLIENT_ID`；开发时也可以用环境变量 `DSH_PROFILE_SYNC_GITHUB_CLIENT_ID` 覆盖。
 
-**插件 → 已安装 → 云同步 → 移除**。`~/.dsh/profile-sync/state.json` 与云端快照可以保留，重装后继续用；如果不再需要，自行删除这两个文件即可。
+Client ID 是公开值，可以随包提交；**不要**把 Client Secret 放进来，Device Flow 不需要它。
 
-## 许可
+授权范围只需要 `repo`（创建私有仓库 + 读写其内容）。
 
-MIT，见 [LICENSE](LICENSE)。问题请提到 [issues](https://github.com/kasshuang/dsh-plugin-profile-sync/issues)。
+## 开发
+
+```powershell
+node test/device-flow.test.mjs   # 设备流状态机（stub fetch，不联网）
+```
+
+目录：`index.js`（Host：路由、GitHub API、设备流、文件夹读写）、`client.js`（Web 端设置页）、`locale/`、`icon.svg`。
+
+## License
+
+MIT

@@ -12,6 +12,10 @@
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
 
 export const inject = ['webServer']
 
@@ -20,6 +24,19 @@ const SCHEMA = 1
 const DOC_FILE = 'dsh-profile-sync.json'
 const TOKEN_KEY = 'dsh-plugin-profile-sync/github-token'
 const MAX_DOC_BYTES = 512 * 1024
+
+/* One-click GitHub connection: OAuth App + Device Flow, so the user never has
+   to create a token or a repository by hand. Register the app once (Device Flow
+   enabled) and paste its public client id here; nothing else is needed. */
+const DEFAULT_CLIENT_ID = 'Ov23litezrV48E7HFG8X'
+const CLIENT_ID = String(process.env.DSH_PROFILE_SYNC_GITHUB_CLIENT_ID || DEFAULT_CLIENT_ID).trim()
+const SYNC_REPO = 'dsh-profile-sync-data'
+const DEVICE_SCOPE = 'repo'
+const DEVICE_CODE_URL = 'https://github.com/login/device/code'
+const DEVICE_TOKEN_URL = 'https://github.com/login/oauth/access_token'
+const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
+const MISSING_CLIENT_ID =
+  'GitHub OAuth client id is not configured: register an OAuth App with Device Flow enabled and set DEFAULT_CLIENT_ID or DSH_PROFILE_SYNC_GITHUB_CLIENT_ID'
 
 const HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const STATE_DIR = path.join(HOME, 'profile-sync')
@@ -85,6 +102,80 @@ function githubBase(repo, branch, docPath) {
   return `https://api.github.com/repos/${repo}/contents/${docPath.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(branch)}`
 }
 
+/* --------------------------------------------------------------- networking */
+/* Node's fetch ignores the Windows system proxy, and many desktops (Clash,
+   V2Ray, company gateways) only reach github.com through one. Resolve the proxy
+   once and let curl do the request, so TLS, chunking and redirects stay correct. */
+
+let proxyCache
+
+async function proxyUrl() {
+  if (proxyCache !== undefined) return proxyCache
+  const env = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY
+    || process.env.http_proxy || process.env.ALL_PROXY || process.env.all_proxy
+  if (env) {
+    proxyCache = env.includes('://') ? env : `http://${env}`
+    return proxyCache
+  }
+  proxyCache = ''
+  if (process.platform === 'win32') {
+    try {
+      const key = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
+      const { stdout } = await execFileAsync('reg', ['query', key], { windowsHide: true })
+      if (/ProxyEnable\s+REG_DWORD\s+0x1/i.test(stdout)) {
+        const found = stdout.match(/ProxyServer\s+REG_SZ\s+(\S+)/i)
+        if (found) {
+          const httpsEntry = found[1].match(/(?:https|http)=([^;]+)/i)
+          const value = httpsEntry ? httpsEntry[1] : found[1].split(';')[0]
+          if (value) proxyCache = value.includes('://') ? value : `http://${value}`
+        }
+      }
+    } catch {
+      proxyCache = ''
+    }
+  }
+  return proxyCache
+}
+
+async function rawRequest(target, init = {}) {
+  const method = String(init.method || 'GET').toUpperCase()
+  const headers = { 'user-agent': 'dsh-plugin-profile-sync', ...(init.headers || {}) }
+  const body = init.body === undefined || init.body === null ? null : String(init.body)
+  /* Tests run without curl and without a proxy: PS_TRANSPORT=fetch swaps the
+     transport for the platform fetch so the suite can stub the network. */
+  if (process.env.PS_TRANSPORT === 'fetch') {
+    const response = await fetch(target, { method, headers, body: body === null ? undefined : body })
+    return { status: response.status, text: await response.text() }
+  }
+  const proxy = await proxyUrl()
+  const args = ['-sS', '--max-time', '40', '--url', target, '-X', method, '-w', '\n%{http_code}']
+  if (proxy) args.push('--proxy', proxy)
+  for (const [key, value] of Object.entries(headers)) args.push('-H', `${key}: ${value}`)
+  if (body !== null) args.push('--data-binary', body)
+  let stdout = ''
+  try {
+    const result = await execFileAsync('curl', args, { windowsHide: true, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8' })
+    stdout = result.stdout
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new Error('cannot run curl, which this plugin needs to reach GitHub')
+    const detail = String(error.stderr || error.message || '').trim().slice(0, 300)
+    throw new Error(`network error: ${detail || 'request failed'}`)
+  }
+  const cut = stdout.lastIndexOf('\n')
+  const status = cut === -1 ? 0 : Number(stdout.slice(cut + 1)) || 0
+  return { status, text: cut === -1 ? stdout : stdout.slice(0, cut) }
+}
+
+async function ghFetch(target, init = {}) {
+  const { status, text } = await rawRequest(target, init)
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => text,
+    json: async () => (text ? JSON.parse(text) : null),
+  }
+}
+
 function githubHeaders(token) {
   return {
     authorization: `Bearer ${token}`,
@@ -95,7 +186,7 @@ function githubHeaders(token) {
 }
 
 async function readGithubDoc(state, token) {
-  const response = await fetch(githubBase(state.repo, state.branch, state.docPath), {
+  const response = await ghFetch(githubBase(state.repo, state.branch, state.docPath), {
     headers: githubHeaders(token),
     signal: AbortSignal.timeout(20_000),
   })
@@ -114,17 +205,23 @@ async function writeGithubDoc(state, token, doc) {
     branch: state.branch,
   }
   const url = `https://api.github.com/repos/${state.repo}/contents/${state.docPath.split('/').map(encodeURIComponent).join('/')}`
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const current = await fetch(`${url}?ref=${encodeURIComponent(state.branch)}`, {
+  /* GitHub answers 409 "Git Repository is empty" for writes that name a branch
+     that does not exist yet. Omitting the branch on the retry turns the write
+     into the repository's first commit, which is the only documented way to
+     authorise a brand new repository through the contents API. */
+  let firstCommit = false
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const current = await ghFetch(`${url}?ref=${encodeURIComponent(state.branch)}`, {
       headers: githubHeaders(token),
       signal: AbortSignal.timeout(20_000),
     })
     const withSha = { ...body }
+    if (firstCommit) delete withSha.branch
     if (current.ok) {
       const meta = await current.json()
       withSha.sha = meta.sha
     }
-    const response = await fetch(url, {
+    const response = await ghFetch(url, {
       method: 'PUT',
       headers: { ...githubHeaders(token), 'content-type': 'application/json' },
       body: JSON.stringify(withSha),
@@ -134,10 +231,221 @@ async function writeGithubDoc(state, token, doc) {
       const saved = await response.json()
       return String(saved.content?.sha || '').slice(0, 7)
     }
-    if (response.status === 409 && attempt === 0) continue
+    if (response.status === 409 && !firstCommit) {
+      firstCommit = true
+      continue
+    }
     throw new Error(`GitHub ${response.status}: ${(await response.text()).slice(0, 300)}`)
   }
   throw new Error('GitHub write raced twice; try again')
+}
+
+/* --------------------------------------------------------------- device flow */
+
+let deviceSession = null
+
+async function githubApi(token, url, init = {}) {
+  const response = await ghFetch(url, {
+    method: init.method || 'GET',
+    headers: {
+      ...githubHeaders(token),
+      ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: AbortSignal.timeout(25_000),
+  })
+  const text = await response.text()
+  let payload = null
+  try {
+    payload = text ? JSON.parse(text) : null
+  } catch {
+    payload = { message: text.slice(0, 300) }
+  }
+  return { status: response.status, payload }
+}
+
+async function deviceRequest(url, fields) {
+  const response = await ghFetch(url, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/x-www-form-urlencoded',
+      'user-agent': 'dsh-plugin-profile-sync',
+    },
+    body: new URLSearchParams(fields).toString(),
+    signal: AbortSignal.timeout(20_000),
+  })
+  const text = await response.text()
+  let payload = null
+  try {
+    payload = text ? JSON.parse(text) : null
+  } catch {
+    payload = { error: 'invalid_response', error_description: text.slice(0, 300) }
+  }
+  if (!response.ok && !payload?.error) {
+    throw new Error(`GitHub ${response.status}: ${text.slice(0, 200) || 'device flow request failed'}`)
+  }
+  return payload || {}
+}
+
+async function deviceStart() {
+  if (!CLIENT_ID) throw new Error(MISSING_CLIENT_ID)
+  const payload = await deviceRequest(DEVICE_CODE_URL, { client_id: CLIENT_ID, scope: DEVICE_SCOPE })
+  if (!payload.device_code) {
+    throw new Error(`GitHub device flow refused: ${payload.error_description || payload.error || 'no device code'}`)
+  }
+  const interval = Math.max(5, Number(payload.interval) || 5)
+  deviceSession = {
+    deviceCode: String(payload.device_code),
+    userCode: String(payload.user_code || ''),
+    verificationUri: String(payload.verification_uri || 'https://github.com/login/device'),
+    interval,
+    expiresAt: Date.now() + (Number(payload.expires_in) || 900) * 1000,
+  }
+  return {
+    userCode: deviceSession.userCode,
+    verificationUri: deviceSession.verificationUri,
+    interval,
+    expiresIn: Math.max(0, Math.round((deviceSession.expiresAt - Date.now()) / 1000)),
+  }
+}
+
+async function githubLogin(token) {
+  const who = await githubApi(token, 'https://api.github.com/user')
+  const login = who.payload?.login
+  if (who.status !== 200 || !login) {
+    throw new Error(`GitHub ${who.status}: ${who.payload?.message || 'cannot read the authorized account'}`)
+  }
+  return String(login)
+}
+
+async function seedEmptyRepo(token, repo, branch) {
+  const blob = await githubApi(token, `https://api.github.com/repos/${repo}/git/blobs`, {
+    method: 'POST',
+    body: {
+      content: Buffer.from('# DSH profile snapshot\n\nManaged by dsh-plugin-profile-sync. Do not edit by hand.\n', 'utf8').toString('base64'),
+      encoding: 'base64',
+    },
+  })
+  if (blob.status !== 201) throw new Error(`GitHub ${blob.status}: ${blob.payload?.message || 'cannot seed the repository'}`)
+  const tree = await githubApi(token, `https://api.github.com/repos/${repo}/git/trees`, {
+    method: 'POST',
+    body: { tree: [{ path: 'README.md', mode: '100644', type: 'blob', sha: blob.payload.sha }] },
+  })
+  if (tree.status !== 201) throw new Error(`GitHub ${tree.status}: ${tree.payload?.message || 'cannot seed the repository'}`)
+  const commit = await githubApi(token, `https://api.github.com/repos/${repo}/git/commits`, {
+    method: 'POST',
+    body: { message: 'init: profile sync snapshot', tree: tree.payload.sha },
+  })
+  if (commit.status !== 201) throw new Error(`GitHub ${commit.status}: ${commit.payload?.message || 'cannot seed the repository'}`)
+  const ref = await githubApi(token, `https://api.github.com/repos/${repo}/git/refs`, {
+    method: 'POST',
+    body: { ref: `refs/heads/${branch}`, sha: commit.payload.sha },
+  })
+  if (ref.status !== 201 && ref.status !== 422) {
+    throw new Error(`GitHub ${ref.status}: ${ref.payload?.message || 'cannot seed the repository'}`)
+  }
+  return branch
+}
+
+/* Make sure <login>/dsh-profile-sync-data exists and has at least one commit,
+   creating and initialising it on first connect. */
+async function ensureSyncRepo(token, login) {
+  const repo = `${login}/${SYNC_REPO}`
+  const found = await githubApi(token, `https://api.github.com/repos/${repo}`)
+  if (found.status === 200) {
+    const branch = String(found.payload?.default_branch || 'main')
+    if (Number(found.payload?.size) === 0) {
+      await seedEmptyRepo(token, repo, branch)
+    }
+    /* The settings page promises a private snapshot; flip an existing public
+       repository rather than silently pushing plugin data into the open. GitHub
+       rejects this on an empty repository, hence the seed first. */
+    if (found.payload?.private !== true) {
+      try {
+        await githubApi(token, `https://api.github.com/repos/${repo}`, { method: 'PATCH', body: { private: true } })
+      } catch {
+        /* visibility is a nicety; never fail the connection over it */
+      }
+    }
+    return { repo, branch }
+  }
+  if (found.status === 401 || found.status === 403) {
+    throw new Error(`GitHub ${found.status}: ${found.payload?.message || 'the token cannot read repositories'}`)
+  }
+  const created = await githubApi(token, 'https://api.github.com/user/repos', {
+    method: 'POST',
+    body: {
+      name: SYNC_REPO,
+      description: 'DSH profile snapshot (dsh-plugin-profile-sync)',
+      private: true,
+      auto_init: true,
+    },
+  })
+  if (created.status === 201) return { repo, branch: String(created.payload?.default_branch || 'main') }
+  /* 422 means somebody already created it between the two calls. */
+  if (created.status === 422) return { repo, branch: 'main' }
+  throw new Error(`GitHub ${created.status}: ${created.payload?.message || 'cannot create the repository'}`)
+}
+
+async function devicePoll(ctx) {
+  if (!CLIENT_ID) throw new Error(MISSING_CLIENT_ID)
+  if (!deviceSession) throw new Error('No GitHub connection in progress; start it again')
+  if (Date.now() > deviceSession.expiresAt) {
+    deviceSession = null
+    return { status: 'expired' }
+  }
+  const payload = await deviceRequest(DEVICE_TOKEN_URL, {
+    client_id: CLIENT_ID,
+    device_code: deviceSession.deviceCode,
+    grant_type: DEVICE_GRANT,
+  })
+
+  if (payload.access_token) {
+    const token = String(payload.access_token)
+    deviceSession = null
+    /* Persist the grant before touching repositories: GitHub returns 409 on
+       write attempts against an empty repository, and losing a valid token to
+       that response would force the user through the device flow again. */
+    await saveToken(ctx, token)
+    const login = await githubLogin(token)
+    let repo = ''
+    let branch = 'main'
+    let repoError = ''
+    try {
+      const ensured = await ensureSyncRepo(token, login)
+      repo = ensured.repo
+      branch = ensured.branch
+    } catch (error) {
+      repoError = String((error && error.message) || error)
+    }
+    const next = {
+      ...(await readState()),
+      adapter: 'repo',
+      repo: repo || `${login}/${SYNC_REPO}`,
+      branch,
+      docPath: DOC_FILE,
+      lastError: repoError,
+    }
+    await writeState(next)
+    return { status: 'ok', login, repo: next.repo, branch, repoError }
+  }
+
+  const error = String(payload.error || '')
+  if (error === 'authorization_pending') return { status: 'pending' }
+  if (error === 'slow_down') {
+    if (deviceSession) deviceSession.interval += 5
+    return { status: 'slow', interval: deviceSession ? deviceSession.interval : 10 }
+  }
+  if (error === 'expired_token') {
+    deviceSession = null
+    return { status: 'expired' }
+  }
+  if (error === 'access_denied') {
+    deviceSession = null
+    return { status: 'denied' }
+  }
+  throw new Error(`GitHub authorization failed: ${payload.error_description || error || 'unknown error'}`)
 }
 
 /* ------------------------------------------------------------- folder store */
@@ -438,6 +746,19 @@ export function apply(ctx) {
           remoteError,
           diff: remote ? computeDiff(bundles, settings, remote.doc) : null,
         })
+      }
+
+      if (request.method === 'POST' && action === 'connect/start') {
+        return json(response, 200, { ok: true, ...(await deviceStart()) })
+      }
+
+      if (request.method === 'POST' && action === 'connect/poll') {
+        return json(response, 200, { ok: true, ...(await devicePoll(ctx)) })
+      }
+
+      if (request.method === 'POST' && action === 'connect/cancel') {
+        deviceSession = null
+        return json(response, 200, { ok: true })
       }
 
       if (request.method === 'POST' && action === 'config') {

@@ -18,6 +18,13 @@ DSH 的插件按机器安装：`~/.dsh/profiles/<profile>/package.json` 里记�
   - `POST /push` → 生成本机快照并写云端（合并后写入）
   - `POST /pull` → 读云端并返回差异
   - `POST /apply` → 应用勾选的安装/启用/设置（只传 `{ns}` 时会先用云端快照补齐 values）
+  - `POST /connect/start` → 发起 GitHub OAuth Device Flow，返回 `user_code` / `verification_uri` / `interval`
+  - `POST /connect/poll` → 轮询一次授权结果：`pending` / `slow` / `expired` / `denied` / `ok`
+  - `POST /connect/cancel` → 丢弃当前设备码会话
+- 一键连接（Device Flow）：
+  - 设备码只在 Host 进程内存里保存（`deviceSession`），授权完成、过期或取消即清空，不落盘。
+  - 授权成功后依次：`GET /user` 取登录名 → `GET /repos/<login>/dsh-profile-sync-data`；404 则 `POST /user/repos`（`private: true, auto_init: true`）创建，已存在但 `size === 0` 则用 Git Data API（blobs → trees → commits → refs）补上首个提交，避免"空仓库无法写 Contents"的坑。
+  - 成功后写凭据库、把 `adapter/repo/branch/docPath` 写进 `state.json`，Client 只需刷新状态。
 - 状态与凭据：
   - `~/.dsh/profile-sync/state.json`：载体、仓库信息、上次同步时间、云端 revision。
   - 凭据键 `dsh-plugin-profile-sync/github-token`（`credentials.modifyRecord()`，不写配置文件）。
@@ -35,7 +42,7 @@ DSH 的插件按机器安装：`~/.dsh/profiles/<profile>/package.json` 里记�
 
 ```json
 {
-  "format": 1,
+  "schema": 1,
   "updatedAt": 1795148904306,
   "device": "WIN-XXXX",
   "bundles": [
@@ -79,7 +86,9 @@ DSH 的插件按机器安装：`~/.dsh/profiles/<profile>/package.json` 里记�
 ## 已知限制
 
 - 只支持一棵云端快照，没有历史版本与冲突合并（按时间戳取新）。
-- GitHub 仓库需用户自建；token 需要 Fine-grained + Contents 读写。
+- 仓库模式优先走一键连接；手工 token 仍保留在「高级」里，需要 Fine-grained + Contents 读写。
+- 一键连接依赖包内置的 OAuth App Client ID，且该 OAuth App 必须开启 Device Flow；没有配置时会返回明确的 `client id is not configured` 错误，而不是静默失败。
+- 授权范围是 `repo`（OAuth App 只能申请经典 scope），比 Fine-grained 宽；这是自动建私有仓库的前提。
 - 云端文件被其他机器同时写入时，GitHub 采用 sha 校验 + 一次 409 重试；极端并发仍可能覆盖。
 
 ## 验证记录（0.1.0）
@@ -88,3 +97,8 @@ DSH 的插件按机器安装：`~/.dsh/profiles/<profile>/package.json` 里记�
 - 应用失败路径：对不存在的包 `apply` 返回 `ok=false applied=0 failed=1 error='operation-error'`。
 - 同源校验：`sec-fetch-site: cross-site` → 403。
 - 真实 GUI（`http://127.0.0.1:61563`）：设置页渲染、载体切换、错误文案本地化（「还没填文件夹路径」）均正常。
+
+## 验证记录（0.2.0）
+
+- `node test/device-flow.test.mjs`：13/13 通过，覆盖未开始轮询、start 返回码、pending、slow_down 加间隔、授权成功建私有仓库、空仓库播种（blobs/trees/commits/refs 顺序与 `refs/heads/main`）、过期、取消后失效。
+- jsdom 渲染测试（`react` 18 + `react-dom/client`）：11/11 通过，覆盖设置页加载、中文渲染、连接按钮、高级折叠默认收起、弹窗显示设备码、授权链接、等待文案、轮询调用、关闭后取消会话。

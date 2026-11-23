@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
   id: 'dsh-plugin-profile-sync',
   factory(require) {
     const React = require('react')
-    const { useCallback, useEffect, useMemo, useState } = React
+    const { useCallback, useEffect, useMemo, useRef, useState } = React
     const h = React.createElement
 
     const BASE = '/plugins/profile-sync'
@@ -67,6 +67,22 @@ window.__ModuleLoader__.load({
         local: '本机',
         remote: '云端',
         hint: '应用只会安装或覆盖这里勾选的内容；凭据永远不同步。',
+        connect: '连接 GitHub',
+        connectTitle: '连接 GitHub',
+        connectIntro: '在浏览器点一次授权，私有仓库和 token 我都会自己建好。',
+        connectCodeLabel: '在 GitHub 页面输入这个代码：',
+        connectOpen: '打开授权页面',
+        connectWaiting: '等你授权中…授权完这里会自动完成，可以先关掉。',
+        connectDone: '连接成功',
+        connectExpired: '代码过期了，重新连一次',
+        connectDenied: '授权被取消',
+        connectMissing: '这个版本还没有配 OAuth App 的 client_id，需要先按 README 注册一个（一分钟）。',
+        connectCancel: '取消',
+        connectCopy: '复制代码',
+        copied: '已复制',
+        connected: '已连接',
+        reconnect: '重新连接',
+        advanced: '高级：手动填仓库和 token',
         failed: '操作失败',
         retry: '重试',
         errFolder: '还没填文件夹路径',
@@ -119,6 +135,22 @@ window.__ModuleLoader__.load({
         local: 'local',
         remote: 'cloud',
         hint: 'Applying only installs or overwrites what you select here; credentials never sync.',
+        connect: 'Connect GitHub',
+        connectTitle: 'Connect GitHub',
+        connectIntro: 'Authorize once in the browser; I create the private repo and store the token.',
+        connectCodeLabel: 'Enter this code on the GitHub page:',
+        connectOpen: 'Open GitHub',
+        connectWaiting: 'Waiting for authorization — this window finishes by itself.',
+        connectDone: 'Connected',
+        connectExpired: 'The code expired — connect again',
+        connectDenied: 'Authorization was cancelled',
+        connectMissing: 'This build has no OAuth App client id yet; register one (one minute) as described in the README.',
+        connectCancel: 'Cancel',
+        connectCopy: 'Copy code',
+        copied: 'Copied',
+        connected: 'Connected',
+        reconnect: 'Reconnect',
+        advanced: 'Advanced: repository and token',
         failed: 'Action failed',
         retry: 'Retry',
       },
@@ -154,6 +186,8 @@ window.__ModuleLoader__.load({
     function humanError(message, t) {
       const text = String(message || '')
       const table = [
+        ['client id is not configured', t.connectMissing],
+        ['No GitHub connection in progress', t.connectExpired],
         ['No sync folder configured', t.errFolder],
         ['No repository configured', t.errRepo],
         ['No GitHub token stored', t.errToken],
@@ -199,6 +233,136 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* One-click GitHub connection: the Host runs the OAuth device flow, this
+       window only shows the code and waits. */
+    function ConnectDialog(props) {
+      const t = props.t
+      const [phase, setPhase] = useState('starting')
+      const [code, setCode] = useState('')
+      const [uri, setUri] = useState('https://github.com/login/device')
+      const [detail, setDetail] = useState('')
+      const [copied, setCopied] = useState(false)
+      const onDone = useRef(props.onDone)
+      const onClose = useRef(props.onClose)
+      onDone.current = props.onDone
+      onClose.current = props.onClose
+
+      useEffect(() => {
+        let cancelled = false
+        let timer = 0
+        let interval = 5
+
+        const fail = (error) => {
+          if (cancelled) return
+          setPhase('error')
+          setDetail(humanError((error && error.message) || error, t))
+        }
+
+        const poll = async () => {
+          if (cancelled) return
+          let payload
+          try {
+            payload = await call('connect/poll')
+          } catch (error) {
+            return fail(error)
+          }
+          if (cancelled) return
+          if (payload.status === 'ok') {
+            setPhase('ok')
+            setDetail(payload.repo || '')
+            onDone.current(payload)
+            timer = setTimeout(() => onClose.current(), 900)
+            return
+          }
+          if (payload.status === 'pending') {
+            timer = setTimeout(poll, interval * 1000)
+            return
+          }
+          if (payload.status === 'slow') {
+            interval = Math.max(10, Number(payload.interval) || 10)
+            timer = setTimeout(poll, interval * 1000)
+            return
+          }
+          if (payload.status === 'expired') return setPhase('expired')
+          if (payload.status === 'denied') return setPhase('denied')
+          timer = setTimeout(poll, interval * 1000)
+        }
+
+        ;(async () => {
+          let started
+          try {
+            started = await call('connect/start', {})
+          } catch (error) {
+            return fail(error)
+          }
+          if (cancelled) return
+          interval = Math.max(5, Number(started.interval) || 5)
+          setCode(started.userCode || '')
+          setUri(started.verificationUri || 'https://github.com/login/device')
+          setPhase('waiting')
+          timer = setTimeout(poll, interval * 1000)
+        })()
+
+        return () => {
+          cancelled = true
+          clearTimeout(timer)
+          call('connect/cancel', {}).catch(() => {})
+        }
+      }, [])
+
+      const copyCode = async () => {
+        try {
+          await navigator.clipboard.writeText(code)
+          setCopied(true)
+        } catch {
+          setCopied(false)
+        }
+      }
+
+      return h('div', { className: 'dps-modal', role: 'dialog', 'aria-modal': 'true' },
+        h('div', { className: 'dps-modal__card' },
+          h('div', { className: 'dps-modal__head' },
+            h('span', { className: 'dps-modal__title' }, t.connectTitle),
+            h('button', {
+              className: 'dps-modal__x',
+              type: 'button',
+              onClick: props.onClose,
+              'aria-label': t.connectCancel,
+            }, '×'),
+          ),
+          phase === 'starting' ? h('p', { className: 'dps-modal__text' }, t.working) : null,
+          phase === 'waiting'
+            ? h('div', { className: 'dps-modal__body' },
+                h('p', { className: 'dps-modal__text' }, t.connectIntro),
+                h('span', { className: 'dps-modal__hint' }, t.connectCodeLabel),
+                h('div', { className: 'dps-code' },
+                  h('code', null, code),
+                  h('button', { className: 'dps-btn', type: 'button', onClick: copyCode }, copied ? t.copied : t.connectCopy),
+                ),
+                h('div', { className: 'dps-actions' },
+                  h('a', {
+                    className: 'dps-btn dps-btn--primary',
+                    href: uri,
+                    target: '_blank',
+                    rel: 'noreferrer noopener',
+                  }, t.connectOpen),
+                ),
+                h('p', { className: 'dps-modal__hint' }, t.connectWaiting),
+              )
+            : null,
+          phase === 'ok' ? h('p', { className: 'dps-modal__ok' }, `${t.connectDone} · ${detail}`) : null,
+          phase === 'expired' ? h('p', { className: 'dps-error' }, t.connectExpired) : null,
+          phase === 'denied' ? h('p', { className: 'dps-error' }, t.connectDenied) : null,
+          phase === 'error' ? h('p', { className: 'dps-error' }, detail || t.failed) : null,
+          phase === 'error' || phase === 'expired' || phase === 'denied'
+            ? h('div', { className: 'dps-actions' },
+                h('button', { className: 'dps-btn', type: 'button', onClick: props.onClose }, t.connectCancel),
+              )
+            : null,
+        ),
+      )
+    }
+
     function SyncSection() {
       const t = useMemo(copy, [activeLocale()])
       const [snapshot, setSnapshot] = useState({ loading: true })
@@ -207,6 +371,8 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = useState({ kind: '', text: '' })
       const [picked, setPicked] = useState({ install: [], enable: [], settings: [] })
       const [diff, setDiff] = useState(null)
+      const [connecting, setConnecting] = useState(false)
+      const [advancedOpen, setAdvancedOpen] = useState(false)
 
       const load = useCallback(async () => {
         try {
@@ -310,6 +476,9 @@ window.__ModuleLoader__.load({
           }
         })
 
+      const authStale = /(?:^|\D)(401|403)(?:\D|$)/.test(String(snapshot.remoteError || state.lastError || ''))
+      const connected = Boolean(state.hasToken && form.repo && !authStale)
+
       return h(
         'section',
         { className: 'dps' },
@@ -336,31 +505,58 @@ window.__ModuleLoader__.load({
           ),
           isRepo
             ? h(React.Fragment, null,
-                h(Field, { label: t.repo }, h('input', {
-                  className: 'dps-input',
-                  value: form.repo,
-                  placeholder: t.repoPlaceholder,
-                  onChange: (event) => setForm({ ...form, repo: event.target.value }),
-                })),
-                h('div', { className: 'dps-grid' },
-                  h(Field, { label: t.branch }, h('input', {
+                connected
+                  ? h('div', { className: 'dps-connect' },
+                      h('span', { className: 'dps-connect__state' },
+                        `${t.connected} · ${form.repo}${form.branch ? ` · ${form.branch}` : ''}`),
+                      h('button', {
+                        className: 'dps-btn',
+                        type: 'button',
+                        onClick: () => setConnecting(true),
+                        disabled: busy !== '',
+                      }, t.reconnect),
+                    )
+                  : h('div', { className: 'dps-connect dps-connect--empty' },
+                      h('button', {
+                        className: 'dps-btn dps-btn--primary',
+                        type: 'button',
+                        onClick: () => setConnecting(true),
+                        disabled: busy !== '',
+                      }, t.connect),
+                      h('span', { className: 'dps-modal__hint' }, authStale ? t.connectExpired : t.connectIntro),
+                    ),
+                h('details', {
+                  className: 'dps-advanced',
+                  open: advancedOpen,
+                  onToggle: (event) => setAdvancedOpen(Boolean(event.currentTarget.open)),
+                },
+                  h('summary', null, t.advanced),
+                  h(Field, { label: t.repo }, h('input', {
                     className: 'dps-input',
-                    value: form.branch,
-                    onChange: (event) => setForm({ ...form, branch: event.target.value }),
+                    value: form.repo,
+                    placeholder: t.repoPlaceholder,
+                    onChange: (event) => setForm({ ...form, repo: event.target.value }),
                   })),
-                  h(Field, { label: t.docPath }, h('input', {
+                  h('div', { className: 'dps-grid' },
+                    h(Field, { label: t.branch }, h('input', {
+                      className: 'dps-input',
+                      value: form.branch,
+                      onChange: (event) => setForm({ ...form, branch: event.target.value }),
+                    })),
+                    h(Field, { label: t.docPath }, h('input', {
+                      className: 'dps-input',
+                      value: form.docPath,
+                      onChange: (event) => setForm({ ...form, docPath: event.target.value }),
+                    })),
+                  ),
+                  h(Field, { label: state.hasToken ? `${t.token} · ${t.tokenSaved}` : t.token }, h('input', {
                     className: 'dps-input',
-                    value: form.docPath,
-                    onChange: (event) => setForm({ ...form, docPath: event.target.value }),
+                    type: 'password',
+                    value: form.token,
+                    placeholder: t.tokenPlaceholder,
+                    onChange: (event) => setForm({ ...form, token: event.target.value }),
                   })),
                 ),
-                h(Field, { label: state.hasToken ? `${t.token} · ${t.tokenSaved}` : t.token }, h('input', {
-                  className: 'dps-input',
-                  type: 'password',
-                  value: form.token,
-                  placeholder: t.tokenPlaceholder,
-                  onChange: (event) => setForm({ ...form, token: event.target.value }),
-                })),
               )
             : h(Field, { label: t.folder }, h('input', {
                 className: 'dps-input',
@@ -446,6 +642,17 @@ window.__ModuleLoader__.load({
             )
           : null,
 
+        connecting
+          ? h(ConnectDialog, {
+              t,
+              onClose: () => setConnecting(false),
+              onDone: () => {
+                setForm(null)
+                load()
+              },
+            })
+          : null,
+
         h('p', { className: 'dps-hint' }, t.hint),
       )
     }
@@ -485,6 +692,22 @@ window.__ModuleLoader__.load({
 .dps-row__meta { font-size:11px; color:var(--dsw-alias-label-secondary); }
 .dps-hint { margin:0; font-size:11px; line-height:1.6; color:var(--dsw-alias-label-secondary); }
 .dps-loading { font-size:12px; color:var(--dsw-alias-label-secondary); padding:12px 0; }
+.dps-connect { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:12px; border:1px dashed var(--dsw-alias-border-l2); border-radius:10px; background:var(--dsw-alias-bg-base); }
+.dps-connect--empty { flex-direction:column; align-items:flex-start; }
+.dps-connect__state { font-size:12px; color:var(--dsw-alias-label-secondary); word-break:break-all; }
+.dps-advanced { display:flex; flex-direction:column; gap:10px; padding-top:4px; }
+.dps-advanced > summary { font-size:11px; color:var(--dsw-alias-label-secondary); cursor:pointer; }
+.dps-modal { position:fixed; inset:0; z-index:4000; display:flex; align-items:center; justify-content:center; padding:16px; background:rgba(0,0,0,.35); }
+.dps-modal__card { width:min(400px,100%); display:flex; flex-direction:column; gap:12px; padding:18px; border-radius:14px; border:1px solid var(--dsw-alias-border-l1); background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary); box-shadow:0 18px 40px rgba(0,0,0,.25); }
+.dps-modal__head { display:flex; align-items:center; justify-content:space-between; }
+.dps-modal__title { font-size:14px; font-weight:600; }
+.dps-modal__x { border:0; background:transparent; color:var(--dsw-alias-label-secondary); font-size:18px; line-height:1; cursor:pointer; }
+.dps-modal__body { display:flex; flex-direction:column; gap:10px; }
+.dps-modal__text { margin:0; font-size:12px; line-height:1.6; color:var(--dsw-alias-label-secondary); }
+.dps-modal__hint { margin:0; font-size:11px; line-height:1.6; color:var(--dsw-alias-label-secondary); }
+.dps-modal__ok { margin:0; font-size:12px; color:var(--dsw-alias-state-success-primary); }
+.dps-code { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-radius:10px; border:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-base); }
+.dps-code code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:18px; letter-spacing:.18em; }
 @media (max-width: 720px) { .dps-grid { grid-template-columns:1fr; } }
 `
 
