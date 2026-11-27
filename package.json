@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-profile-sync",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Sync which DSH plugins are installed, plus whitelisted plugin settings, through a private GitHub repository or a synced folder.",
   "type": "module",
   "main": "./index.js",

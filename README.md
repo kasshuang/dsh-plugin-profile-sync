@@ -55,6 +55,7 @@ dsh plugin add dsh-plugin-profile-sync
 - token 走 DSH 的 credentials 服务，落在 `~/.dsh/.credentials.yaml`，**不会**写进同步文档。
 - 同步文档里只有插件清单和白名单命名空间的设置值。
 - 设备授权码只在内存里保存一次轮询周期，授权完成或取消即丢弃。
+- 插件自己的 HTTP 路由（`/plugins/profile-sync/*`）先过 DSH 的请求门禁 `ctx.connection.requestRejection`：Host 栅栏 + 开启浏览器登录时的会话 cookie，未通过直接 401/403、路由不执行。浏览器里任意网页无法借用你的 cookie 读写同步状态。
 
 ## 给插件作者：注册 OAuth App（一次性，约一分钟）
 

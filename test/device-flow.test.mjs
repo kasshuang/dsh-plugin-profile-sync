@@ -79,6 +79,7 @@ const store = {
 }
 
 let handler = null
+let connectionStub = undefined
 const ctx = {
   webServer: {
     register(entry) {
@@ -88,6 +89,7 @@ const ctx = {
   },
   get(name) {
     if (name === 'credentials') return store
+    if (name === 'connection') return connectionStub
     return undefined
   },
   effect(fn) {
@@ -100,12 +102,12 @@ const plugin = await import(pathToFileURL(path.join(import.meta.dirname, '..', '
 plugin.apply(ctx)
 assert.equal(typeof handler, 'function', 'Host registered its web route')
 
-async function invoke(action, body) {
+async function invokeRaw(action, { host = '127.0.0.1:1234', body } = {}) {
   const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body), 'utf8')]
   const request = {
     url: `/plugins/profile-sync/${action}`,
     method: body === undefined ? 'GET' : 'POST',
-    headers: { host: '127.0.0.1:1234', 'sec-fetch-site': 'same-origin' },
+    headers: { host, 'sec-fetch-site': 'same-origin' },
     async *[Symbol.asyncIterator]() {
       for (const chunk of chunks) yield chunk
     },
@@ -120,6 +122,11 @@ async function invoke(action, body) {
     },
   }
   await handler(request, response)
+  return out
+}
+
+async function invoke(action, body) {
+  const out = await invokeRaw(action, { body })
   let json = null
   try {
     json = out.text ? JSON.parse(out.text) : null
@@ -272,6 +279,51 @@ function check(name, fn) {
     assert.equal(dead.status, 500)
     assert.match(dead.json.error, /No GitHub connection in progress/)
   })
+}
+
+/* 5. The host's own request gate guards every route. */
+{
+  const gateCalls = []
+  const connection = {
+    marker: 'connection',
+    requestRejection(request) {
+      gateCalls.push({ self: this, host: request.headers.host })
+      return request.headers.host === 'evil.example:1234' ? 401 : undefined
+    },
+  }
+  connectionStub = connection
+
+  const allowed = await invokeRaw('state')
+  check('the host gate is consulted as a method of the connection service', () => {
+    assert.equal(gateCalls.length, 1, 'requestRejection was called')
+    assert.equal(gateCalls[0].self, connection, 'this stayed bound to the connection service')
+  })
+  check('a request the host gate accepts reaches the route', () => {
+    assert.equal(allowed.status, 200)
+    assert.equal(JSON.parse(allowed.text).ok, true)
+  })
+
+  const denied = await invokeRaw('state', { host: 'evil.example:1234' })
+  check('a request the host gate rejects is answered 401 and never runs the route', () => {
+    assert.equal(denied.status, 401)
+    assert.equal(denied.text, 'unauthorized')
+  })
+
+  const throwing = {
+    requestRejection() {
+      throw new Error('gate exploded')
+    },
+  }
+  connectionStub = throwing
+  const crashedGate = await invokeRaw('state')
+  check('a gate that throws fails closed', () => assert.equal(crashedGate.status, 403))
+
+  /* Older hosts have no connection service: keep the loopback fence. */
+  connectionStub = undefined
+  const loopback = await invokeRaw('state')
+  check('without a connection service a loopback host still works', () => assert.equal(loopback.status, 200))
+  const remote = await invokeRaw('state', { host: '192.168.1.20:1234' })
+  check('without a connection service a LAN host is refused', () => assert.equal(remote.status, 403))
 }
 
 const failed = results.filter((row) => !row.ok)

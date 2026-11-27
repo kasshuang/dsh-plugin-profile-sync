@@ -90,6 +90,7 @@ window.__ModuleLoader__.load({
         errToken: '还没保存 GitHub Token',
         errNoRemote: '云端还没有快照，先推送一次',
         errForbidden: '跨站请求被拒绝',
+        errSession: '会话失效了，刷新页面后再试',
         errLock: '插件目录被占用，请先关闭占用它的程序后重试',
       },
       en: {
@@ -153,6 +154,13 @@ window.__ModuleLoader__.load({
         advanced: 'Advanced: repository and token',
         failed: 'Action failed',
         retry: 'Retry',
+        errFolder: 'No folder path yet',
+        errRepo: 'No repository yet (owner/repo)',
+        errToken: 'No GitHub token stored yet',
+        errNoRemote: 'No snapshot in the cloud yet — push once first',
+        errForbidden: 'Cross-origin request rejected',
+        errSession: 'Your session expired — reload the page and try again',
+        errLock: 'The plugin folder is busy; close whatever is holding it and retry',
       },
     }
 
@@ -169,6 +177,8 @@ window.__ModuleLoader__.load({
         signal: AbortSignal.timeout(40_000),
       })
       const text = await response.text()
+      /* The host gate answers plain-text 401/403 before the route even runs. */
+      if (response.status === 401 || response.status === 403) throw new Error('forbidden: host gate')
       let payload = null
       try {
         payload = text ? JSON.parse(text) : null
@@ -193,6 +203,7 @@ window.__ModuleLoader__.load({
         ['No GitHub token stored', t.errToken],
         ['No snapshot in the cloud yet', t.errNoRemote],
         ['Cross-origin request rejected', t.errForbidden],
+        ['forbidden: host gate', t.errSession],
         ['EPERM', t.errLock],
         ['EBUSY', t.errLock],
       ]

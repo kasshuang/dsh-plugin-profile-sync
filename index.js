@@ -643,6 +643,30 @@ function sameOrigin(request) {
   }
 }
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
+
+/* The host's own gate for anything a browser can reach: it fences the Host
+   header and, when browser login is on, requires the session cookie. Without it
+   a page the user happens to have open can call these routes with that
+   browser's cookies, which is exactly what DSH's /api refuses. Called as a
+   method — it reads this.trustedHosts / this.browserAuth, so a detached copy
+   would reject every caller, the settings page included. */
+function accessDenial(ctx, request) {
+  const connection = typeof ctx.get === 'function' ? ctx.get('connection') : ctx.connection
+  const gate = connection && connection.requestRejection
+  if (typeof gate === 'function') {
+    try {
+      return gate.call(connection, request)
+    } catch {
+      return 403
+    }
+  }
+  /* Hosts older than the connection service only get the loopback fence. */
+  const host = String(request.headers.host || '').toLowerCase().replace(/:\d+$/, '')
+  return LOOPBACK_HOSTS.has(host) ? undefined : 403
+}
+
+
 async function readBody(request) {
   const chunks = []
   let size = 0
@@ -715,6 +739,12 @@ async function applyPlan(ctx, plan) {
 
 export function apply(ctx) {
   const handle = async (request, response) => {
+    const denial = accessDenial(ctx, request)
+    if (denial !== undefined) {
+      response.writeHead(denial, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+      response.end(denial === 401 ? 'unauthorized' : 'forbidden')
+      return
+    }
     if (!sameOrigin(request)) return json(response, 403, { ok: false, error: 'Cross-origin request rejected' })
 
     const url = new URL(request.url || ROUTE, 'http://localhost')

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3 — 2026-11-27
+
+- 补上 DSH 自己的请求门禁：`/plugins/profile-sync/*` 的每个请求先过 `ctx.connection.requestRejection(req)`（Host 栅栏 + 开启浏览器登录时的会话 cookie），被拒时回 401/403，路由逻辑根本不执行。之前只有同源校验，浏览器里随便一个网页都能用你的 cookie 读走同步状态。
+- 以方法形式调用（`gate.call(connection, request)`），不会因为丢了 `this` 把设置页自己也挡在外面；没有 connection 服务的旧版 Host 退回 loopback 白名单。
+- 测试补 6 条门禁用例（含 `this` 绑定、401 拒绝、异常 fail-closed、旧版回退），`node test/device-flow.test.mjs` 19/19。
+
 ## 0.2.2 — 2026-11-23
 
 - 修复空仓库首次推送失败：GitHub 对「分支还不存在」的写入返回 409 `Git Repository is empty`。现在遇到 409 会去掉 `branch` 重试一次，这一下就成为仓库的首个提交，之后 `main` 分支自然存在，`推送到云端` 一次成功（本机实测 revision `2eeedac`，13 个 bundle、1 个设置命名空间）。
